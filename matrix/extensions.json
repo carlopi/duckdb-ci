@@ -3,6 +3,7 @@
     "include": [
       {
         "duckdb_arch": "linux_amd64",
+        "prebuilt_duckdb_artifact": "duckdb-static-libs-linux-amd64.tar.gz",
         "runner": "ubuntu-24.04",
         "vcpkg_target_triplet": "x64-linux-release",
         "vcpkg_host_triplet": "x64-linux-release",
@@ -11,6 +12,7 @@
       },
       {
         "duckdb_arch": "linux_arm64",
+        "prebuilt_duckdb_artifact": "duckdb-static-libs-linux-arm64.tar.gz",
         "runner": "ubuntu-24.04-arm",
         "vcpkg_target_triplet": "arm64-linux-release",
         "vcpkg_host_triplet": "arm64-linux-release",
@@ -19,6 +21,7 @@
       },
       {
         "duckdb_arch": "linux_amd64_musl",
+        "prebuilt_duckdb_artifact": "duckdb-static-libs-linux-amd64-musl.tar.gz",
         "runner": "ubuntu-24.04",
         "vcpkg_target_triplet": "x64-linux-release",
         "vcpkg_host_triplet": "x64-linux-release",
@@ -27,6 +30,7 @@
       },
       {
         "duckdb_arch": "linux_arm64_musl",
+        "prebuilt_duckdb_artifact": "duckdb-static-libs-linux-arm64-musl.tar.gz",
         "runner": "ubuntu-24.04-arm",
         "vcpkg_target_triplet": "arm64-linux-release",
         "vcpkg_host_triplet": "arm64-linux-release",
@@ -39,15 +43,17 @@
     "include": [
       {
         "duckdb_arch": "osx_amd64",
+        "prebuilt_duckdb_artifact": "duckdb-static-libs-osx-amd64.tar.gz",
         "runner": "macos-latest",
         "osx_build_arch": "x86_64",
         "vcpkg_target_triplet": "x64-osx-release",
         "vcpkg_host_triplet": "arm64-osx-release",
         "run_in_reduced_ci_mode": false,
-        "opt_in": false
+        "opt_in": true
       },
       {
         "duckdb_arch": "osx_arm64",
+        "prebuilt_duckdb_artifact": "duckdb-static-libs-osx-arm64.tar.gz",
         "runner": "macos-latest",
         "osx_build_arch": "arm64",
         "vcpkg_target_triplet": "arm64-osx-release",
@@ -61,6 +67,7 @@
     "include": [
       {
         "duckdb_arch": "windows_amd64",
+        "prebuilt_duckdb_artifact": "duckdb-static-libs-windows-amd64.tar.gz",
         "runner": "windows-2025-vs2026",
         "vcpkg_target_triplet": "x64-windows-static-release",
         "vcpkg_host_triplet": "x64-windows-static-release",
@@ -69,6 +76,7 @@
       },
       {
         "duckdb_arch": "windows_arm64",
+        "prebuilt_duckdb_artifact": "duckdb-static-libs-windows-arm64.tar.gz",
         "runner": "windows-11-arm",
         "vcpkg_target_triplet": "arm64-windows-static-release",
         "vcpkg_host_triplet": "arm64-windows-static-release",
@@ -77,6 +85,7 @@
       },
       {
         "duckdb_arch": "windows_amd64_mingw",
+        "prebuilt_duckdb_artifact": "duckdb-static-libs-windows-mingw.tar.gz",
         "runner": "windows-2025-vs2026",
         "vcpkg_target_triplet": "x64-mingw-static",
         "vcpkg_host_triplet": "x64-mingw-static",

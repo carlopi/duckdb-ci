@@ -108,7 +108,8 @@ def test_push_auto_keeps_full_non_opt_in_matrix(tmp_path):
     )
 
     assert "linux_arm64" in matrices.build.linux.archs
-    assert "osx_amd64" in matrices.build.macos.archs
+    assert "osx_amd64" not in matrices.build.macos.archs
+    assert "osx_arm64" in matrices.build.macos.archs
     assert "windows_amd64_mingw" in matrices.build.windows.archs
     assert "wasm_threads" in matrices.build.wasm.archs
     assert "windows_arm64" not in matrices.build.windows.archs
@@ -120,6 +121,62 @@ def test_explicit_reduced_ci_modes(tmp_path):
 
     assert "linux_arm64" not in enabled.build.linux.archs
     assert "linux_arm64" in disabled.build.linux.archs
+    assert "osx_amd64" not in disabled.build.macos.archs
+
+
+def test_osx_amd64_opt_in_overrides_reduced_ci_for_every_group(tmp_path):
+    matrices = compute_core_matrices(
+        load_repo_config(),
+        opt_in_archs="osx_amd64",
+        reduced_ci_mode="enabled",
+        event_type="pull_request",
+    )
+
+    assert matrices.build.macos.archs == [
+        "osx_amd64",
+        "osx_amd64",
+        "osx_amd64",
+    ]
+    assert [job.group_name for job in matrices.build.macos.includes] == [
+        "external",
+        "main",
+        "rust",
+    ]
+    assert matrices.test.macos.archs == ["osx_amd64"]
+
+
+def test_osx_amd64_exclusion_overrides_opt_in(tmp_path):
+    matrices = compute_core_matrices(
+        load_repo_config(),
+        exclude_archs="osx_amd64",
+        opt_in_archs="osx_amd64",
+        reduced_ci_mode="disabled",
+    )
+
+    assert "osx_amd64" not in matrices.build.macos.archs
+    assert "osx_amd64" not in matrices.test.macos.archs
+
+
+def test_group_opt_ins_are_additive_with_run_opt_ins(tmp_path):
+    matrices = compute_matrices(
+        load_repo_config(),
+        groups="""custom:
+  config: custom.cmake
+  opt_in_archs: windows_arm64
+  toolchain: main
+other:
+  config: other.cmake
+  toolchain: main
+""",
+        opt_in_archs="osx_amd64",
+        reduced_ci_mode="enabled",
+    )
+
+    matrices.build.macos.get(arch="osx_amd64", prefix="custom-extensions")
+    matrices.build.macos.get(arch="osx_amd64", prefix="other-extensions")
+    matrices.build.windows.get(arch="windows_arm64", prefix="custom-extensions")
+    with pytest.raises(MatrixError, match="found 0"):
+        matrices.build.windows.get(arch="windows_arm64", prefix="other-extensions")
 
 
 def test_exclude_and_opt_in_filters(tmp_path):
@@ -151,6 +208,44 @@ def test_exclude_wasm_eh_alias_skips_wasm_base(tmp_path):
         reduced_ci_mode="disabled",
     )
     assert "wasm_base" in unaffected.build.wasm.archs
+
+
+@pytest.mark.parametrize(
+    ("windows_vcpkg_toolchain", "suffix"),
+    (("cl", ""), ("clang-cl", "-clangcl")),
+)
+def test_windows_jobs_select_vcpkg_toolchain(windows_vcpkg_toolchain, suffix):
+    matrices = compute_core_matrices(
+        load_repo_config(),
+        opt_in_archs="windows_arm64",
+        reduced_ci_mode="disabled",
+        windows_vcpkg_toolchain=windows_vcpkg_toolchain,
+    )
+
+    for arch, base_triplet in (
+        ("windows_amd64", "x64-windows-static-release"),
+        ("windows_arm64", "arm64-windows-static-release"),
+    ):
+        triplet = f"{base_triplet}{suffix}"
+        build = matrices.build.windows.get(arch=arch, prefix="main-extensions")
+        test = matrices.test.windows.get(arch=arch)
+        assert build.vcpkg_target_triplet == triplet
+        assert build.vcpkg_host_triplet == triplet
+        assert test.vcpkg_target_triplet == triplet
+        assert test.vcpkg_host_triplet == triplet
+
+    mingw = matrices.build.windows.get(
+        arch="windows_amd64_mingw", prefix="main-extensions"
+    )
+    assert mingw.vcpkg_target_triplet == "x64-mingw-static"
+    assert mingw.vcpkg_host_triplet == "x64-mingw-static"
+
+
+def test_windows_vcpkg_toolchain_rejects_unknown_value():
+    with pytest.raises(MatrixError, match="must be cl\\|clang-cl"):
+        compute_core_matrices(
+            load_repo_config(), windows_vcpkg_toolchain="clangcl"
+        )
 
 
 def test_split_list_accepts_commas_semicolons_and_deduplicates():
@@ -301,6 +396,60 @@ main:
     )
 
 
+def test_cuda_group_settings_reach_each_build_row():
+    matrices = compute_matrices(
+        {key: value if key == "linux" else {"include": []} for key, value in load_repo_config().items()},
+        groups="""older:
+  config: cuda12.cmake
+  toolchain: cuda12
+  cuda_archs: "70-real;80-real"
+newer:
+  config: cuda13.cmake
+  toolchain: cuda13
+  cuda_archs: " 90a-real, 120;90a-real "
+""",
+        reduced_ci_mode="disabled",
+    )
+    assert len(matrices.build.linux.includes) == 4
+    for arch in ("linux_amd64", "linux_arm64"):
+        for group, version, architectures in (
+            ("older", "12", "70-real;80-real"),
+            ("newer", "13", "90a-real;120"),
+        ):
+            row = matrices.build.linux.get(arch=arch, prefix=f"{group}-extensions").to_dict()
+            assert row["cuda_version"] == version
+            assert row["cuda_archs"] == architectures
+            assert row["container_name"].endswith(f"_cuda{version}")
+    for row in matrices.test.linux.to_dict()["include"]:
+        assert "cuda_version" not in row
+        assert "cuda_archs" not in row
+    log = render_readable_matrix_log(matrices)
+    assert "cuda_archs: 70-real;80-real" in log
+    assert "cuda_version: 13" in log
+
+
+@pytest.mark.parametrize(
+    "toolchain, version",
+    [("main", ""), ("rust", ""), ("cuda12", "12"), ("cuda13", "13")],
+)
+@pytest.mark.parametrize("setting", ["", '  cuda_archs: ""\n'])
+def test_cuda_architectures_default_to_empty(toolchain, version, setting):
+    matrices = compute_matrices(
+        {key: value if key == "linux" else {"include": []} for key, value in load_repo_config().items()},
+        groups=f"example:\n  config: extension.cmake\n  toolchain: {toolchain}\n{setting}",
+        reduced_ci_mode="enabled",
+    )
+    row = matrices.build.linux.get(arch="linux_amd64").to_dict()
+    assert row["cuda_version"] == version
+    assert row["cuda_archs"] == ""
+
+
+@pytest.mark.parametrize("toolchain", ["main", "rust"])
+def test_cuda_architectures_require_cuda_toolchain(toolchain):
+    with pytest.raises(MatrixError, match="cuda_archs requires a CUDA toolchain"):
+        parse_groups(f"example:\n  config: extension.cmake\n  toolchain: {toolchain}\n  cuda_archs: 80-real\n")
+
+
 def test_cuda_toolchain_rejects_unsupported_architectures():
     with pytest.raises(
         MatrixError,
@@ -312,6 +461,7 @@ def test_cuda_toolchain_rejects_unsupported_architectures():
   config: .github/config/cuda_extensions.cmake
   toolchain: cuda13
 """,
+            opt_in_archs="osx_amd64",
             reduced_ci_mode="disabled",
         )
 
@@ -367,6 +517,7 @@ def test_group_expansion_exposes_extra_toolchains_only_on_builds():
   extra_toolchains: unixodbc;parser_tools
   toolchain: main
 """,
+        opt_in_archs="osx_amd64",
         reduced_ci_mode="disabled",
     )
 
@@ -465,6 +616,34 @@ def test_artifact_names_match_one_deduplicated_test_row_per_arch():
             vcpkg_target_triplet="arm64-linux-release",
         )
     ]
+
+
+def test_prebuilt_duckdb_artifacts_are_part_of_native_build_rows():
+    matrices = compute_core_matrices(
+        load_repo_config(),
+        reduced_ci_mode="disabled",
+    )
+
+    expected = {
+        "linux_amd64": "duckdb-static-libs-linux-amd64.tar.gz",
+        "linux_arm64": "duckdb-static-libs-linux-arm64.tar.gz",
+        "linux_amd64_musl": "duckdb-static-libs-linux-amd64-musl.tar.gz",
+        "linux_arm64_musl": "duckdb-static-libs-linux-arm64-musl.tar.gz",
+        "osx_amd64": "duckdb-static-libs-osx-amd64.tar.gz",
+        "osx_arm64": "duckdb-static-libs-osx-arm64.tar.gz",
+        "windows_amd64": "duckdb-static-libs-windows-amd64.tar.gz",
+        "windows_arm64": "duckdb-static-libs-windows-arm64.tar.gz",
+        "windows_amd64_mingw": "duckdb-static-libs-windows-mingw.tar.gz",
+    }
+    for platform in ("linux", "macos", "windows"):
+        for job in matrices.build.for_platform(platform).includes:
+            assert job.prebuilt_duckdb_artifact == expected[job.duckdb_arch]
+            assert (
+                job.to_dict()["prebuilt_duckdb_artifact"]
+                == expected[job.duckdb_arch]
+            )
+    for job in matrices.build.wasm.includes:
+        assert job.prebuilt_duckdb_artifact == ""
 
 
 def test_arch_without_build_groups_has_no_test_row():

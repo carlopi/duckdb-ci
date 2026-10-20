@@ -36,13 +36,28 @@ runs:
         fi
 
         # PR events carry pull_request.number; a PR comment carries issue.number;
-        # CI events (check_suite / status) carry neither — ingest resolves the PR
-        # from head_sha in that case.
+        # a workflow_run (CI finished) carries workflow_run.pull_requests + head_sha
+        # (empty pull_requests for fork PRs — ingest then resolves from head_sha).
         action=$(jq -r '.action // ""' "$payload")
-        number=$(jq -r '(.pull_request.number // .issue.number // 0)' "$payload")
+        number=$(jq -r '(.pull_request.number // .issue.number // .workflow_run.pull_requests[0].number // 0)' "$payload")
         label=$(jq -r '.label.name // ""' "$payload")
         commenter=$(jq -r '.comment.user.login // ""' "$payload")
-        head_sha=$(jq -r '(.check_suite.head_sha // .sha // "")' "$payload")
+        head_sha=$(jq -r '(.check_suite.head_sha // .workflow_run.head_sha // .sha // "")' "$payload")
+
+        # Don't dispatch events the tracker ignores: each dispatch costs a billed
+        # ingest run on the private tracker. Drafting a PR moves nothing (the daily
+        # sweep still files anything missed), and only the review-cycle labels move
+        # a card — match them case-insensitively, since repos spell them differently.
+        if [ "$action" = "converted_to_draft" ]; then
+          echo "converted_to_draft is not routed by pr-tracker; nothing to forward."
+          exit 0
+        fi
+        if [ "$action" = "labeled" ] || [ "$action" = "unlabeled" ]; then
+          case "$(printf '%s' "$label" | tr '[:upper:]' '[:lower:]')" in
+            "changes requested"|"do not review"|"ready for review") ;;
+            *) echo "label '$label' is not routed by pr-tracker; nothing to forward."; exit 0 ;;
+          esac
+        fi
 
         jq -n \
           --arg event "$event" \

@@ -123,9 +123,9 @@ jobs:
           docker push "${main_image}"
           echo "${main_image}" >> "${pushed_images_file}"
 
-          # Build and push remaining variants that depend on already-published base images.
-          IMAGE_SUFFIX="${IMAGE_SUFFIX}" TOOLCHAINS="${{ matrix.dependent_toolchains }}" "./docker/${{ matrix.distro }}/build.sh" "${{ matrix.arch }}"
+          # Build and push dependent variants in order so later variants can pull earlier bases.
           for toolchain in ${{ matrix.dependent_toolchains }}; do
+            IMAGE_SUFFIX="${IMAGE_SUFFIX}" TOOLCHAINS="${toolchain}" "./docker/${{ matrix.distro }}/build.sh" "${{ matrix.arch }}"
             image="${REPO_PREFIX}/${{ matrix.distro }}_${{ matrix.arch }}_${toolchain}${IMAGE_SUFFIX}:${IMAGE_VERSION}"
             docker push "${image}"
             echo "${image}" >> "${pushed_images_file}"
@@ -522,6 +522,7 @@ jobs:
         shell: bash
         env:
           RUNNER_PROVIDER: ${{ steps.detect.outputs.runner_provider }}
+          RUNNER_LINUX_SLIM: ${{ steps.detect.outputs.runner_linux_slim }}
           RUNNER_LINUX_SMALL: ${{ steps.detect.outputs.runner_linux_small }}
           RUNNER_LINUX_X64: ${{ steps.detect.outputs.runner_linux_x64 }}
           RUNNER_LINUX_22_X64: ${{ steps.detect.outputs.runner_linux_22_x64 }}
@@ -535,6 +536,7 @@ jobs:
           set -euo pipefail
 
           [[ "${RUNNER_PROVIDER}" == "namespace" ]]
+          [[ "${RUNNER_LINUX_SLIM}" == "namespace-profile-linux-slim" ]]
           [[ "${RUNNER_LINUX_SMALL}" == "namespace-profile-linux-small" ]]
           [[ "${RUNNER_LINUX_X64}" == "namespace-profile-linux-x64" ]]
           [[ "${RUNNER_LINUX_22_X64}" == "namespace-profile-linux-22-x64" ]]
@@ -545,6 +547,7 @@ jobs:
           [[ "${RUNNER_MACOS_14_ARM64}" == "namespace-profile-macos-14-arm64" ]]
 
           jq -e . <<<"${RUNNERS_JSON}" >/dev/null
+          [[ "$(jq -r '.linux_slim' <<<"${RUNNERS_JSON}")" == "${RUNNER_LINUX_SLIM}" ]]
           [[ "$(jq -r '.linux_x64' <<<"${RUNNERS_JSON}")" == "${RUNNER_LINUX_X64}" ]]
           [[ "$(jq -r '.linux_22_x64' <<<"${RUNNERS_JSON}")" == "${RUNNER_LINUX_22_X64}" ]]
           [[ "$(jq -r '.linux_arm64' <<<"${RUNNERS_JSON}")" == "${RUNNER_LINUX_ARM64}" ]]
@@ -588,6 +591,7 @@ jobs:
           runners: ${{ steps.detect.outputs.runners }}
           reduced_ci_mode: disabled
           image_version: ${{ needs.prepare.outputs.image_version }}
+          windows_vcpkg_toolchain: clang-cl
           groups: |
             external:
               config: .github/config/external_extensions.cmake
@@ -626,6 +630,15 @@ jobs:
               jq -e '.include | type == "array"' <<<"$output" >/dev/null
             fi
           done
+          jq -e '
+            all(.include[];
+              if .duckdb_arch == "windows_amd64" or .duckdb_arch == "windows_arm64"
+              then (.vcpkg_target_triplet | endswith("-clangcl")) and
+                   (.vcpkg_host_triplet | endswith("-clangcl"))
+              else true
+              end
+            )
+          ' <<<"$BUILD_WINDOWS" >/dev/null
 
   test-checkout:
     name: Test checkout (${{ matrix.runner_provider }}, ${{ matrix.runs_on }})
@@ -875,7 +888,7 @@ jobs:
       - test-image-compat
       - test-image-lint
       - test-compat
-    runs-on: ubuntu-slim
+    runs-on: namespace-profile-linux-slim
     steps:
       - name: Check CI status
         run: |

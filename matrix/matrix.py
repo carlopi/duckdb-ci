@@ -20,6 +20,8 @@ PLATFORM_CONFIG_KEYS: dict[Platform, str] = {
 PULL_REQUEST = "pull_request"
 PUSH = "push"
 UNKNOWN = "unknown"
+WINDOWS_VCPKG_TOOLCHAINS = {"cl", "clang-cl"}
+CUDA_TOOLCHAIN_VERSIONS = {"cuda12": "12", "cuda13": "13"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,6 +32,7 @@ class ExtensionGroup:
     opt_in_archs: str | None
     config_paths: tuple[str, ...]
     extra_toolchains: str = ""
+    cuda_archs: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,6 +52,9 @@ class BuildJob:
     container_name: str | None = None
     container: str | None = None
     extra_toolchains: str = ""
+    prebuilt_duckdb_artifact: str = ""
+    cuda_version: str = ""
+    cuda_archs: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         result: dict[str, Any] = {
@@ -63,6 +69,9 @@ class BuildJob:
             "opt_in_archs": self.opt_in_archs,
             "toolchain": self.toolchain,
             "extra_toolchains": self.extra_toolchains,
+            "prebuilt_duckdb_artifact": self.prebuilt_duckdb_artifact,
+            "cuda_version": self.cuda_version,
+            "cuda_archs": self.cuda_archs,
             "extension_config_paths": list(self.extension_config_paths),
         }
         if self.osx_build_arch is not None:
@@ -245,6 +254,24 @@ def resolve_reduced_ci_mode(mode: str | None, event_type: str) -> bool:
     return event_type == PULL_REQUEST
 
 
+def parse_windows_vcpkg_toolchain(value: str | None) -> str:
+    toolchain = (value or "").strip() or "cl"
+    if toolchain not in WINDOWS_VCPKG_TOOLCHAINS:
+        raise MatrixError(
+            f"invalid Windows vcpkg toolchain: {toolchain!r} (must be cl|clang-cl)"
+        )
+    return toolchain
+
+
+def select_vcpkg_triplet(duckdb_arch: str, triplet: str, windows_toolchain: str) -> str:
+    if duckdb_arch not in {"windows_amd64", "windows_arm64"}:
+        return triplet
+    base_triplet = triplet.removesuffix("-clangcl")
+    if windows_toolchain == "clang-cl":
+        return f"{base_triplet}-clangcl"
+    return base_triplet
+
+
 def load_extensions_config(path: Path) -> dict[str, Any]:
     with path.open(encoding="utf-8") as f:
         data = json.load(f)
@@ -277,7 +304,7 @@ def validate_entry(platform: str, entry: Any) -> None:
         "run_in_reduced_ci_mode",
         "opt_in",
     }
-    allowed = required | {"osx_build_arch"}
+    allowed = required | {"osx_build_arch", "prebuilt_duckdb_artifact"}
     entry_fields = {str(key) for key in entry}
     unknown = entry_fields - allowed
     if unknown:
@@ -358,6 +385,7 @@ def parse_groups(raw: str | None) -> tuple[ExtensionGroup, ...]:
             value = value.strip()
             if field not in {
                 "config",
+                "cuda_archs",
                 "default_exclude_archs",
                 "extra_toolchains",
                 "opt_in_archs",
@@ -404,13 +432,16 @@ def parse_groups(raw: str | None) -> tuple[ExtensionGroup, ...]:
         toolchain = config["toolchain"]
         if not isinstance(toolchain, str) or not toolchain:
             raise MatrixError(f"group {key!r} toolchain must be a non-empty string")
-        supported_toolchains = {"main", "rust", "cuda12", "cuda13"}
+        supported_toolchains = {"main", "rust", *CUDA_TOOLCHAIN_VERSIONS}
         if toolchain not in supported_toolchains:
             raise MatrixError(f"group {key!r} has unsupported toolchain: {toolchain!r}")
-        for field in ("default_exclude_archs", "extra_toolchains", "opt_in_archs"):
+        for field in ("default_exclude_archs", "extra_toolchains", "opt_in_archs", "cuda_archs"):
             value = config.get(field)
             if value is not None and not isinstance(value, str):
                 raise MatrixError(f"group {key!r} {field} must be a string")
+        cuda_archs = join_list(split_list(config.get("cuda_archs")))
+        if cuda_archs and toolchain not in CUDA_TOOLCHAIN_VERSIONS:
+            raise MatrixError(f"group {key!r} cuda_archs requires a CUDA toolchain")
         parsed.append(
             ExtensionGroup(
                 key=key,
@@ -419,6 +450,7 @@ def parse_groups(raw: str | None) -> tuple[ExtensionGroup, ...]:
                 extra_toolchains=config.get("extra_toolchains", ""),
                 opt_in_archs=config.get("opt_in_archs"),
                 config_paths=paths,
+                cuda_archs=cuda_archs,
             )
         )
     return tuple(parsed)
@@ -480,9 +512,9 @@ def include_entry(entry: dict[str, Any], excluded: set[str], opt_in: set[str], r
     duckdb_arch = entry["duckdb_arch"]
     if duckdb_arch in excluded:
         return False
+    if entry["opt_in"]:
+        return duckdb_arch in opt_in
     if reduced_ci and not entry["run_in_reduced_ci_mode"]:
-        return False
-    if entry["opt_in"] and duckdb_arch not in opt_in:
         return False
     return True
 
@@ -506,9 +538,10 @@ def build_job(
     effective_exclude_archs: str,
     effective_opt_in_archs: str,
     image_version: str,
+    windows_vcpkg_toolchain: str,
 ) -> BuildJob:
     duckdb_arch = str(entry["duckdb_arch"])
-    if group.toolchain in ("cuda12", "cuda13") and (
+    if group.toolchain in CUDA_TOOLCHAIN_VERSIONS and (
         not duckdb_arch.startswith("linux_") or duckdb_arch.endswith("_musl")
     ):
         raise MatrixError(f"{group.toolchain} toolchain does not support architecture {duckdb_arch!r}")
@@ -522,8 +555,12 @@ def build_job(
             container = f"ghcr.io/duckdb/duckdb-ci/{container_name}:{image_version}"
     return BuildJob(
         runner=runner,
-        vcpkg_target_triplet=str(entry["vcpkg_target_triplet"]),
-        vcpkg_host_triplet=str(entry["vcpkg_host_triplet"]),
+        vcpkg_target_triplet=select_vcpkg_triplet(
+            duckdb_arch, str(entry["vcpkg_target_triplet"]), windows_vcpkg_toolchain
+        ),
+        vcpkg_host_triplet=select_vcpkg_triplet(
+            duckdb_arch, str(entry["vcpkg_host_triplet"]), windows_vcpkg_toolchain
+        ),
         duckdb_arch=duckdb_arch,
         group_name=group.key,
         prefix=prefix,
@@ -532,6 +569,9 @@ def build_job(
         opt_in_archs=effective_opt_in_archs,
         toolchain=group.toolchain,
         extra_toolchains=group.extra_toolchains,
+        prebuilt_duckdb_artifact=str(entry.get("prebuilt_duckdb_artifact", "")),
+        cuda_version=CUDA_TOOLCHAIN_VERSIONS.get(group.toolchain, ""),
+        cuda_archs=group.cuda_archs,
         extension_config_paths=group.config_paths,
         osx_build_arch=osx_build_arch,
         container_name=container_name,
@@ -545,6 +585,7 @@ def test_job(
     toolchains: tuple[str, ...],
     extension_config_paths: tuple[str, ...],
     image_version: str,
+    windows_vcpkg_toolchain: str,
 ) -> TestJob:
     duckdb_arch = str(entry["duckdb_arch"])
     osx_build_arch = str(entry["osx_build_arch"]) if "osx_build_arch" in entry else None
@@ -558,8 +599,12 @@ def test_job(
         runner=runner,
         duckdb_arch=duckdb_arch,
         artifact_pattern=f"*-extensions-{duckdb_arch}",
-        vcpkg_target_triplet=str(entry["vcpkg_target_triplet"]),
-        vcpkg_host_triplet=str(entry["vcpkg_host_triplet"]),
+        vcpkg_target_triplet=select_vcpkg_triplet(
+            duckdb_arch, str(entry["vcpkg_target_triplet"]), windows_vcpkg_toolchain
+        ),
+        vcpkg_host_triplet=select_vcpkg_triplet(
+            duckdb_arch, str(entry["vcpkg_host_triplet"]), windows_vcpkg_toolchain
+        ),
         toolchains=toolchains,
         extension_config_paths=extension_config_paths,
         osx_build_arch=osx_build_arch,
@@ -578,10 +623,12 @@ def compute_matrices(
     event_type: str = UNKNOWN,
     image_version: str = "",
     groups: str | None = None,
+    windows_vcpkg_toolchain: str = "cl",
 ) -> Matrices:
     reduced_ci = resolve_reduced_ci_mode(reduced_ci_mode, event_type)
     runner_overrides = parse_runners(runners)
     extension_groups = parse_groups(groups)
+    windows_toolchain = parse_windows_vcpkg_toolchain(windows_vcpkg_toolchain)
 
     result = Matrices()
     for output_platform, config_key in PLATFORM_CONFIG_KEYS.items():
@@ -594,13 +641,8 @@ def compute_matrices(
         ] = {}
         for group in extension_groups:
             effective_exclude_archs = combine_lists(group.default_exclude_archs, exclude_archs)
-            if group.opt_in_archs is not None:
-                effective_opt_in_archs = group.opt_in_archs
-            elif group.key == "main":
-                effective_opt_in_archs = opt_in_archs
-            else:
-                effective_opt_in_archs = ""
-            excluded = expand_exclude_aliases(set(split_list(effective_exclude_archs)))
+            effective_opt_in_archs = combine_lists(opt_in_archs, group.opt_in_archs)
+            excluded = set(split_list(effective_exclude_archs))
             opt_in = set(split_list(effective_opt_in_archs))
             for entry in entries:
                 if not include_entry(entry, excluded, opt_in, reduced_ci):
@@ -614,6 +656,7 @@ def compute_matrices(
                         effective_exclude_archs,
                         effective_opt_in_archs,
                         image_version,
+                        windows_toolchain,
                     )
                 )
                 duckdb_arch = str(entry["duckdb_arch"])
@@ -637,6 +680,7 @@ def compute_matrices(
                 tuple(sorted(toolchains)),
                 tuple(config_paths),
                 image_version,
+                windows_toolchain,
             )
             for entry, runner, toolchains, config_paths, _ in test_entries.values()
         )
@@ -686,6 +730,7 @@ def _append_build_matrix_log(
         ("group_name", lambda job: job.group_name),
         ("artifact_prefix", lambda job: job.prefix),
         ("artifact_name", lambda job: job.artifact_name),
+        ("prebuilt_duckdb_artifact", lambda job: job.prebuilt_duckdb_artifact),
         ("vcpkg_target_triplet", lambda job: job.vcpkg_target_triplet),
         ("vcpkg_host_triplet", lambda job: job.vcpkg_host_triplet),
         ("toolchain", lambda job: job.toolchain),
@@ -706,6 +751,8 @@ def _append_build_matrix_log(
         _append_detail(detail_lines, "exclude_archs", job.exclude_archs, indent="    ")
         _append_detail(detail_lines, "opt_in_archs", job.opt_in_archs, indent="    ")
         _append_detail(detail_lines, "container", job.container, indent="    ")
+        _append_detail(detail_lines, "cuda_version", job.cuda_version, indent="    ")
+        _append_detail(detail_lines, "cuda_archs", job.cuda_archs, indent="    ")
 
     _append_matrix_log(lines, output_key, matrix.includes, columns, append_details)
 

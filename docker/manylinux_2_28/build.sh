@@ -23,6 +23,8 @@ fi
 BASE_IMAGE="manylinux_2_28"
 CMAKE_VERSION="${CMAKE_VERSION:-4.4.3}"
 CCACHE_VERSION="${CCACHE_VERSION:-4.13.5}"
+CUDA12_VERSION="${CUDA12_VERSION:-12-9}"
+CUDA13_VERSION="${CUDA13_VERSION:-13-4}"
 LCOV_VERSION="${LCOV_VERSION:-2.5}"
 RCLONE_INSTALL_VERSION="${RCLONE_INSTALL_VERSION:-1.69.3}"
 S5CMD_VERSION="${S5CMD_VERSION:-2.3.0}"
@@ -51,6 +53,12 @@ build_toolchain() {
 	local repo="${REPO_PREFIX}/${BASE_IMAGE}_${ARCH}_${toolchain}${IMAGE_SUFFIX}"
 	local cpp_repo="${REPO_PREFIX}/${BASE_IMAGE}_${ARCH}_cpp${IMAGE_SUFFIX}"
 	local main_repo="${REPO_PREFIX}/${BASE_IMAGE}_${ARCH}_main${IMAGE_SUFFIX}"
+	local rust_repo="${REPO_PREFIX}/${BASE_IMAGE}_${ARCH}_rust${IMAGE_SUFFIX}"
+	local cuda_version=""
+	case "${toolchain}" in
+		cuda12) cuda_version="${CUDA12_VERSION}" ;;
+		cuda13) cuda_version="${CUDA13_VERSION}" ;;
+	esac
 
 	case "${toolchain}" in
 		cpp)
@@ -84,8 +92,8 @@ build_toolchain() {
 				"${repo}" \
 				"${root}/cuda/Dockerfile" \
 				"." \
-				--build-arg "CPP_IMAGE=${cpp_repo}:${IMAGE_VERSION}" \
-				--build-arg "CUDA_VERSION=${toolchain#"cuda"}"
+				--build-arg "RUST_IMAGE=${rust_repo}:${IMAGE_VERSION}" \
+				--build-arg "CUDA_VERSION=${cuda_version}"
 			;;
 		*)
 			echo "Unknown toolchain: ${toolchain}" >&2
