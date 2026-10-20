@@ -461,6 +461,21 @@ def resolve_runner(entry: dict[str, Any], overrides: dict[str, list[str]]) -> li
     return [entry["runner"]]
 
 
+# Retired duckdb_arch names mapped to the platform that replaced them, so an
+# exclude list that still names the old platform keeps skipping the new one.
+EXCLUDE_ALIASES = {
+    "wasm_eh": "wasm_base",
+}
+
+
+def expand_exclude_aliases(excluded: set[str]) -> set[str]:
+    expanded = set(excluded)
+    for alias, target in EXCLUDE_ALIASES.items():
+        if alias in excluded:
+            expanded.add(target)
+    return expanded
+
+
 def include_entry(entry: dict[str, Any], excluded: set[str], opt_in: set[str], reduced_ci: bool) -> bool:
     duckdb_arch = entry["duckdb_arch"]
     if duckdb_arch in excluded:
@@ -585,7 +600,7 @@ def compute_matrices(
                 effective_opt_in_archs = opt_in_archs
             else:
                 effective_opt_in_archs = ""
-            excluded = set(split_list(effective_exclude_archs))
+            excluded = expand_exclude_aliases(set(split_list(effective_exclude_archs)))
             opt_in = set(split_list(effective_opt_in_archs))
             for entry in entries:
                 if not include_entry(entry, excluded, opt_in, reduced_ci):

@@ -26,7 +26,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 DUCKDB_CORE_GROUPS = """external:
   config: .github/config/external_extensions.cmake
-  default_exclude_archs: wasm_base;wasm_threads;windows_amd64_mingw;windows_amd64;linux_amd64_musl
+  default_exclude_archs: wasm_mvp;wasm_eh;wasm_threads;windows_amd64_mingw;windows_amd64;linux_amd64_musl
   toolchain: main
 main:
   config:
@@ -134,6 +134,23 @@ def test_exclude_and_opt_in_filters(tmp_path):
     assert "linux_amd64_musl" in matrices.build.linux.archs
     assert "windows_arm64" in matrices.build.windows.archs
     assert "wasm_base" not in matrices.build.wasm.archs
+
+
+def test_exclude_wasm_eh_alias_skips_wasm_base(tmp_path):
+    matrices = compute_core_matrices(
+        load_repo_config(),
+        exclude_archs="wasm_eh",
+        reduced_ci_mode="disabled",
+    )
+    assert matrices.build.wasm.archs == ["wasm_threads"]
+    assert matrices.test.wasm.archs == ["wasm_threads"]
+
+    unaffected = compute_core_matrices(
+        load_repo_config(),
+        exclude_archs="wasm_mvp",
+        reduced_ci_mode="disabled",
+    )
+    assert "wasm_base" in unaffected.build.wasm.archs
 
 
 def test_split_list_accepts_commas_semicolons_and_deduplicates():
