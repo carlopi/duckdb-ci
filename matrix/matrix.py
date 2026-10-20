@@ -642,7 +642,7 @@ def compute_matrices(
         for group in extension_groups:
             effective_exclude_archs = combine_lists(group.default_exclude_archs, exclude_archs)
             effective_opt_in_archs = combine_lists(opt_in_archs, group.opt_in_archs)
-            excluded = set(split_list(effective_exclude_archs))
+            excluded = expand_exclude_aliases(set(split_list(effective_exclude_archs)))
             opt_in = set(split_list(effective_opt_in_archs))
             for entry in entries:
                 if not include_entry(entry, excluded, opt_in, reduced_ci):
